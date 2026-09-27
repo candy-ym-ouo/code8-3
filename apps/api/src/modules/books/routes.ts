@@ -5,7 +5,7 @@ import { BOOK_STATUSES, MOOD_TAGS, type BookStatus, type MoodTag } from '@paper-
 import { prisma } from '../../lib/prisma.js';
 import { AppError, zodFields } from '../../lib/errors.js';
 import { currentUser, requireAuth } from '../../lib/auth.js';
-import { normalizeMoodTags, normalizeText, validateStatusTransition } from '../../lib/domain.js';
+import { normalizeMoodTags, normalizeText, validateStatusExtras, validateStatusTransition } from '../../lib/domain.js';
 import { writeEvent } from '../../lib/events.js';
 import { paginationFromQuery, parseId } from '../../lib/http.js';
 
@@ -75,9 +75,39 @@ const reflectionInputSchema = z.object({
 
 const statusSchema = z.object({
   status: z.enum(BOOK_STATUSES as [BookStatus, ...BookStatus[]]),
-  version: z.number().int().positive().optional(),
+  version: z.number({ error: '请携带书目版本号' }).int().positive('版本号无效'),
+  note: nullableText(2000),
+  pauseReason: nullableText(500),
   reflection: reflectionInputSchema.optional()
 });
+
+function serializeStint(stint: {
+  id: string;
+  bookId: string;
+  stintRound: number;
+  note: string | null;
+  pauseReason: string | null;
+  endStatus: BookStatus | null;
+  startedAt: Date;
+  endedAt: Date | null;
+  version: number;
+  createdAt: Date;
+  updatedAt: Date;
+}) {
+  return {
+    id: stint.id,
+    bookId: stint.bookId,
+    stintRound: stint.stintRound,
+    note: stint.note,
+    pauseReason: stint.pauseReason,
+    endStatus: stint.endStatus,
+    startedAt: stint.startedAt,
+    endedAt: stint.endedAt,
+    version: stint.version,
+    createdAt: stint.createdAt,
+    updatedAt: stint.updatedAt
+  };
+}
 
 function serializeReflection(reflection: {
   id: string;
@@ -248,13 +278,23 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
           status: data.status
         }
       });
+      // 直接以“阅读中”建书时，第一段阅读经历从建书时刻开始。
+      if (created.status === 'READING') {
+        await tx.readingStint.create({
+          data: { userId, bookId: created.id, stintRound: 1, startedAt: created.createdAt }
+        });
+      }
       await writeEvent(tx, {
         userId,
         bookId: created.id,
         entityType: 'BOOK',
         entityId: created.id,
         action: 'CREATED',
-        payload: { bookTitle: created.title, status: created.status }
+        payload: {
+          bookTitle: created.title,
+          status: created.status,
+          ...(created.status === 'READING' ? { stintRound: 1 } : {})
+        }
       });
       return created;
     });
@@ -278,6 +318,10 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
         reflections: {
           where: { deletedAt: null },
           orderBy: [{ completedAt: 'desc' }, { createdAt: 'desc' }]
+        },
+        readingStints: {
+          where: { deletedAt: null },
+          orderBy: { stintRound: 'desc' }
         }
       }
     });
@@ -291,7 +335,8 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
           annotations: book._count.annotations,
           rereadMarks: book._count.rereadMarks
         },
-        reflections: book.reflections.map(serializeReflection)
+        reflections: book.reflections.map(serializeReflection),
+        stints: book.readingStints.map(serializeStint)
       }
     };
   });
@@ -357,16 +402,58 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
       throw new AppError(422, 'VALIDATION_ERROR', '状态信息无效', zodFields(parsed.error));
     }
     const userId = currentUser(request).id;
+    const note = parsed.data.note ? normalizeText(parsed.data.note) : null;
+    const pauseReason = parsed.data.pauseReason ? normalizeText(parsed.data.pauseReason) : null;
     const result = await prisma.$transaction(async (tx) => {
+      // 状态变更全程持有书行行锁：状态与时间线事件在同一事务提交，顺序不会分叉。
       await tx.$queryRaw`SELECT id FROM books WHERE id = ${bookId}::uuid AND user_id = ${userId}::uuid FOR UPDATE`;
       const book = await tx.book.findFirst({ where: { id: bookId, userId, deletedAt: null } });
       if (!book) throw new AppError(404, 'NOT_FOUND', '书目不存在');
-      if (parsed.data.version && parsed.data.version !== book.version) {
+      if (parsed.data.version !== book.version) {
         throw new AppError(409, 'STALE_WRITE', '书目已在其他位置被修改，请刷新后重试');
       }
       validateStatusTransition(book.status, parsed.data.status);
+      validateStatusExtras(parsed.data.status, { note, pauseReason });
       if (book.status === parsed.data.status) {
+        if (note || pauseReason) {
+          throw new AppError(422, 'VALIDATION_ERROR', '状态未变化，备注没有可归属的阅读阶段');
+        }
         return { book, reflection: null };
+      }
+
+      const now = new Date();
+      let stintRound: number | null = null;
+
+      // 离开“阅读中”时关闭当前阅读阶段；每段经历独立保留，再读不会覆盖旧经历。
+      if (book.status === 'READING') {
+        const openStint = await tx.readingStint.findFirst({
+          where: { bookId, endedAt: null, deletedAt: null },
+          orderBy: { stintRound: 'desc' }
+        });
+        if (openStint) {
+          stintRound = openStint.stintRound;
+          await tx.readingStint.update({
+            where: { id: openStint.id },
+            data: {
+              endedAt: now,
+              endStatus: parsed.data.status,
+              pauseReason: parsed.data.status === 'PAUSED' ? pauseReason : null,
+              version: { increment: 1 }
+            }
+          });
+        }
+      }
+
+      // 进入“阅读中”时开启新的阅读阶段（想读、搁置、读完后都可能开始新的一段）。
+      if (parsed.data.status === 'READING') {
+        const latest = await tx.readingStint.aggregate({
+          where: { bookId },
+          _max: { stintRound: true }
+        });
+        stintRound = (latest._max.stintRound ?? 0) + 1;
+        await tx.readingStint.create({
+          data: { userId, bookId, stintRound, note, startedAt: now }
+        });
       }
 
       if (parsed.data.status === 'READ') {
@@ -378,7 +465,7 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
         const moodTags = normalizeMoodTags(parsed.data.reflection.moodTags);
         const completedAt = parsed.data.reflection.completedAt
           ? new Date(parsed.data.reflection.completedAt)
-          : new Date();
+          : now;
         if (
           completedAt.getTime() < book.createdAt.getTime() ||
           completedAt.getTime() > Date.now() + 5 * 60 * 1000
@@ -392,7 +479,6 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
           _max: { completionRound: true }
         });
         const completionRound = (latest._max.completionRound ?? 0) + 1;
-        const now = new Date();
         const reflection = await tx.completionReflection.create({
           data: {
             userId,
@@ -415,7 +501,12 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
           entityType: 'BOOK',
           entityId: bookId,
           action: 'STATUS_CHANGED',
-          payload: { previousStatus: book.status, nextStatus: 'READ', completionRound }
+          payload: {
+            previousStatus: book.status,
+            nextStatus: 'READ',
+            completionRound,
+            ...(stintRound !== null ? { stintRound } : {})
+          }
         });
         await writeEvent(tx, {
           userId,
@@ -438,7 +529,13 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
         entityType: 'BOOK',
         entityId: bookId,
         action: 'STATUS_CHANGED',
-        payload: { previousStatus: book.status, nextStatus: parsed.data.status }
+        payload: {
+          previousStatus: book.status,
+          nextStatus: parsed.data.status,
+          ...(stintRound !== null ? { stintRound } : {}),
+          ...(pauseReason ? { pauseReason } : {}),
+          ...(note ? { note } : {})
+        }
       });
       return { book: updated, reflection: null };
     });
@@ -469,7 +566,9 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
         tx.dogEar.updateMany({ where: { bookId, deletedAt: null }, data: { deletedAt: now, version: { increment: 1 } } }),
         tx.annotation.updateMany({ where: { bookId, deletedAt: null }, data: { deletedAt: now, version: { increment: 1 } } }),
         tx.rereadMark.updateMany({ where: { bookId, deletedAt: null }, data: { deletedAt: now, version: { increment: 1 } } }),
-        tx.completionReflection.updateMany({ where: { bookId, deletedAt: null }, data: { deletedAt: now, version: { increment: 1 } } })
+        tx.completionReflection.updateMany({ where: { bookId, deletedAt: null }, data: { deletedAt: now, version: { increment: 1 } } }),
+        // 阅读阶段随书目软删除；其生命周期已由 STATUS_CHANGED 事件完整记录，不再单独写事件。
+        tx.readingStint.updateMany({ where: { bookId, deletedAt: null }, data: { deletedAt: now, version: { increment: 1 } } })
       ]);
       await tx.book.update({
         where: { id: bookId },

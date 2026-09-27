@@ -42,7 +42,13 @@ export const booksApi = {
     api.patch<{ book: Book }>(`/books/${id}`, body),
   updateStatus: (
     id: string,
-    body: { status: BookStatus; version: number; reflection?: { moodTags: MoodTag[]; text: string } }
+    body: {
+      status: BookStatus;
+      version: number;
+      note?: string | null;
+      pauseReason?: string | null;
+      reflection?: { moodTags: MoodTag[]; text: string };
+    }
   ) => api.patch<{ book: Book; reflection?: Reflection }>(`/books/${id}/status`, body),
   delete: (id: string, version: number) => api.delete<void>(`/books/${id}`, { version }),
   traces: (id: string, params: URLSearchParams) =>

@@ -46,7 +46,8 @@ export const timelineRoutes: FastifyPluginAsync = async (app) => {
       prisma.activityEvent.count({ where }),
       prisma.activityEvent.findMany({
         where,
-        orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+        // seq 单调递增，同事务内的事件也按写入顺序排列，时间线顺序与状态变更顺序一致。
+        orderBy: [{ seq: 'desc' }],
         skip,
         take: pageSize,
         include: { book: { select: { title: true } } }
@@ -56,6 +57,7 @@ export const timelineRoutes: FastifyPluginAsync = async (app) => {
     return {
       items: events.map((event) => ({
         id: event.id,
+        seq: Number(event.seq),
         bookId: event.bookId,
         bookTitle: event.book?.title ?? '已删除书目',
         entityType: event.entityType,

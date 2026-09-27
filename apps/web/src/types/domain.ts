@@ -31,6 +31,21 @@ export interface Book {
   hasCompletionReflection?: boolean;
   lastTraceAt?: string | null;
   reflections?: Reflection[];
+  stints?: ReadingStint[];
+}
+
+export interface ReadingStint {
+  id: string;
+  bookId: string;
+  stintRound: number;
+  note: string | null;
+  pauseReason: string | null;
+  endStatus: BookStatus | null;
+  startedAt: string;
+  endedAt: string | null;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface DogEar {
@@ -84,6 +99,7 @@ export interface Reflection {
 
 export interface TimelineEvent {
   id: string;
+  seq: number;
   bookId: string | null;
   bookTitle: string;
   entityType: ActivityEntityType;

@@ -151,6 +151,19 @@ export const reflectionRoutes: FastifyPluginAsync = async (app) => {
         _max: { completionRound: true }
       });
       if (currentBook.status === 'READ' && (latestActive._max.completionRound ?? 0) < existing.completionRound) {
+        // 撤销最近一次“读完”后书目回到“阅读中”，对应阅读阶段重新打开，状态与经历保持一致。
+        const lastStint = await tx.readingStint.findFirst({
+          where: { bookId: existing.bookId, deletedAt: null },
+          orderBy: { stintRound: 'desc' }
+        });
+        let stintRound: number | null = null;
+        if (lastStint && lastStint.endStatus === 'READ' && lastStint.endedAt) {
+          stintRound = lastStint.stintRound;
+          await tx.readingStint.update({
+            where: { id: lastStint.id },
+            data: { endedAt: null, endStatus: null, version: { increment: 1 } }
+          });
+        }
         await tx.book.update({
           where: { id: existing.bookId },
           data: { status: 'READING', version: { increment: 1 } }
@@ -161,7 +174,12 @@ export const reflectionRoutes: FastifyPluginAsync = async (app) => {
           entityType: 'BOOK',
           entityId: existing.bookId,
           action: 'STATUS_CHANGED',
-          payload: { previousStatus: 'READ', nextStatus: 'READING', reason: 'reflection_deleted' }
+          payload: {
+            previousStatus: 'READ',
+            nextStatus: 'READING',
+            reason: 'reflection_deleted',
+            ...(stintRound !== null ? { stintRound } : {})
+          }
         });
       }
     });
@@ -198,6 +216,19 @@ export const reflectionRoutes: FastifyPluginAsync = async (app) => {
         where: { id },
         data: { deletedAt: null, version: { increment: 1 } }
       });
+      // 恢复“读完”后书目回到“已读完”，当前进行中的阅读阶段随之关闭。
+      const openStint = await tx.readingStint.findFirst({
+        where: { bookId: existing.bookId, endedAt: null, deletedAt: null },
+        orderBy: { stintRound: 'desc' }
+      });
+      let stintRound: number | null = null;
+      if (openStint) {
+        stintRound = openStint.stintRound;
+        await tx.readingStint.update({
+          where: { id: openStint.id },
+          data: { endedAt: new Date(), endStatus: 'READ', version: { increment: 1 } }
+        });
+      }
       await tx.book.update({
         where: { id: existing.bookId },
         data: { status: 'READ', version: { increment: 1 } }
@@ -216,7 +247,12 @@ export const reflectionRoutes: FastifyPluginAsync = async (app) => {
         entityType: 'BOOK',
         entityId: existing.bookId,
         action: 'STATUS_CHANGED',
-        payload: { previousStatus: 'READING', nextStatus: 'READ', reason: 'reflection_restored' }
+        payload: {
+          previousStatus: 'READING',
+          nextStatus: 'READ',
+          reason: 'reflection_restored',
+          ...(stintRound !== null ? { stintRound } : {})
+        }
       });
       return value;
     });

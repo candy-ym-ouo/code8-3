@@ -64,6 +64,22 @@ export function validateStatusTransition(current: BookStatus, next: BookStatus):
   }
 }
 
+export function validateStatusExtras(
+  next: BookStatus,
+  extras: { note?: string | null; pauseReason?: string | null }
+): void {
+  if (extras.pauseReason && next !== 'PAUSED') {
+    throw new AppError(422, 'VALIDATION_ERROR', '只有暂时搁置时才能记录暂停原因', {
+      pauseReason: '只有暂时搁置时才能记录暂停原因'
+    });
+  }
+  if (extras.note && next !== 'READING') {
+    throw new AppError(422, 'VALIDATION_ERROR', '只有开始一段阅读时才能记录阶段备注', {
+      note: '只有开始一段阅读时才能记录阶段备注'
+    });
+  }
+}
+
 export function normalizeMoodTags(tags: MoodTag[]): MoodTag[] {
   const unique = [...new Set(tags)];
   if (unique.length < 1 || unique.length > 3) {

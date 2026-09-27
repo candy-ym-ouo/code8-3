@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { isRestoreWindowOpen, isStrictlyEditable, normalizeMoodTags, validatePageRange, validateStatusTransition } from './domain.js';
+import {
+  isRestoreWindowOpen,
+  isStrictlyEditable,
+  normalizeMoodTags,
+  validatePageRange,
+  validateStatusExtras,
+  validateStatusTransition
+} from './domain.js';
 import { AppError } from './errors.js';
 
 describe('domain rules', () => {
@@ -11,6 +18,15 @@ describe('domain rules', () => {
   it('rejects illegal status transitions', () => {
     expect(() => validateStatusTransition('TO_READ', 'READ')).toThrow(AppError);
     expect(() => validateStatusTransition('ABANDONED', 'READING')).toThrow(AppError);
+  });
+
+  it('accepts pause reason only when pausing and note only when starting to read', () => {
+    expect(() => validateStatusExtras('PAUSED', { pauseReason: '先读完另一本' })).not.toThrow();
+    expect(() => validateStatusExtras('READING', { note: '这次重点看第三章' })).not.toThrow();
+    expect(() => validateStatusExtras('READING', { pauseReason: '不属于这里' })).toThrow(AppError);
+    expect(() => validateStatusExtras('PAUSED', { note: '不属于这里' })).toThrow(AppError);
+    expect(() => validateStatusExtras('READ', { note: 'x', pauseReason: 'y' })).toThrow(AppError);
+    expect(() => validateStatusExtras('ABANDONED', {})).not.toThrow();
   });
 
   it('validates page ranges and page count', () => {

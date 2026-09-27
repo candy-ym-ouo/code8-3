@@ -36,7 +36,7 @@ const loading = ref(true);
 const saving = ref(false);
 const error = ref('');
 const success = ref('');
-const activeTab = ref<'PAGES' | TraceType | 'REFLECTIONS' | 'TIMELINE'>('PAGES');
+const activeTab = ref<'PAGES' | TraceType | 'REFLECTIONS' | 'TIMELINE' | 'STINTS'>('PAGES');
 const createType = ref<TraceType | null>(null);
 const editing = ref<Trace | null>(null);
 const showCompleteForm = ref(false);
@@ -53,6 +53,11 @@ const completeForm = reactive({
   moodTags: [] as MoodTag[],
   text: ''
 });
+const statusForm = reactive<{ target: 'READING' | 'PAUSED' | null; note: string; pauseReason: string }>({
+  target: null,
+  note: '',
+  pauseReason: ''
+});
 
 const tabs = computed(() => [
   { value: 'PAGES' as const, label: '按页' },
@@ -60,6 +65,7 @@ const tabs = computed(() => [
   { value: 'ANNOTATION' as const, label: `批注 ${book.value?.traceSummary.annotations ?? 0}` },
   { value: 'REREAD_MARK' as const, label: `重读 ${book.value?.traceSummary.rereadMarks ?? 0}` },
   { value: 'REFLECTIONS' as const, label: `读完感受 ${reflections.value.length}` },
+  { value: 'STINTS' as const, label: `阅读经历 ${book.value?.stints?.length ?? 0}` },
   { value: 'TIMELINE' as const, label: '本书时间线' }
 ]);
 
@@ -257,16 +263,45 @@ async function changeStatus(status: BookStatus): Promise<void> {
   if (status === 'READ') {
     completeForm.moodTags = [];
     completeForm.text = '';
+    statusForm.target = null;
     showCompleteForm.value = true;
+    return;
+  }
+  if (status === 'READING' || status === 'PAUSED') {
+    statusForm.target = status;
+    statusForm.note = '';
+    statusForm.pauseReason = '';
+    showCompleteForm.value = false;
     return;
   }
   if (!window.confirm(`将「${book.value.title}」的状态改为“${STATUS_LABELS[status]}”？`)) return;
   saving.value = true;
   error.value = '';
   try {
-    const result = await booksApi.updateStatus(book.value.id, { status, version: book.value.version });
-    book.value = { ...book.value, ...result.book, traceSummary: book.value.traceSummary };
+    await booksApi.updateStatus(book.value.id, { status, version: book.value.version });
     success.value = '书目状态已更新';
+    await load();
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : '状态更新失败';
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function submitStatusForm(): Promise<void> {
+  if (!book.value || !statusForm.target) return;
+  saving.value = true;
+  error.value = '';
+  try {
+    await booksApi.updateStatus(book.value.id, {
+      status: statusForm.target,
+      version: book.value.version,
+      note: statusForm.target === 'READING' ? statusForm.note.trim() || null : null,
+      pauseReason: statusForm.target === 'PAUSED' ? statusForm.pauseReason.trim() || null : null
+    });
+    statusForm.target = null;
+    success.value = '书目状态已更新';
+    await load();
   } catch (caught) {
     error.value = caught instanceof ApiError ? caught.message : '状态更新失败';
   } finally {
@@ -361,6 +396,12 @@ function eventSummary(payload: Record<string, unknown>): string {
     return `第 ${payload.startPage}–${end} 页`;
   }
   if (Array.isArray(payload.moodTags)) return payload.moodTags.map((tag) => MOOD_LABELS[tag as MoodTag] ?? tag).join('、');
+  if (typeof payload.previousStatus === 'string' && typeof payload.nextStatus === 'string') {
+    const from = STATUS_LABELS[payload.previousStatus as BookStatus] ?? payload.previousStatus;
+    const to = STATUS_LABELS[payload.nextStatus as BookStatus] ?? payload.nextStatus;
+    const reason = typeof payload.pauseReason === 'string' && payload.pauseReason ? ` · ${payload.pauseReason}` : '';
+    return `${from} → ${to}${reason}`;
+  }
   if (payload.cascade) return '随书目删除';
   return '';
 }
@@ -418,6 +459,25 @@ onMounted(load);
         <span v-if="statusActions.length === 0" class="muted">当前状态没有可执行的后续操作</span>
       </div>
     </section>
+
+    <form v-if="statusForm.target" class="card completion-form" @submit.prevent="submitStatusForm">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">{{ statusForm.target === 'PAUSED' ? 'PAUSED' : 'READING' }}</p>
+          <h2>{{ statusForm.target === 'PAUSED' ? `暂时搁置《${bookView.title}》` : `开始一段新的阅读` }}</h2>
+        </div>
+        <button class="button button-quiet" type="button" @click="statusForm.target = null">取消</button>
+      </div>
+      <label v-if="statusForm.target === 'PAUSED'">
+        暂停原因（可选）
+        <textarea v-model="statusForm.pauseReason" rows="3" maxlength="500" placeholder="为什么先放下这本书？写下来，日后接着读时还能看到。" />
+      </label>
+      <label v-else>
+        阶段备注（可选）
+        <textarea v-model="statusForm.note" rows="3" maxlength="2000" placeholder="这一段想怎么读、为什么再翻开，都可以写在这里。" />
+      </label>
+      <button class="button button-primary" type="submit" :disabled="saving">确认</button>
+    </form>
 
     <form v-if="showCompleteForm" class="card completion-form" @submit.prevent="completeBook">
       <div class="section-heading">
@@ -518,6 +578,21 @@ onMounted(load);
           </form>
         </article>
         <p v-if="reflections.length === 0" class="empty-inline">还没有读完后留下的感受。</p>
+      </div>
+
+      <div v-else-if="activeTab === 'STINTS'" class="trace-list">
+        <article v-for="stint in bookView.stints ?? []" :key="stint.id" class="trace-card">
+          <div class="trace-card-heading">
+            <div>
+              <span class="trace-type">第 {{ stint.stintRound }} 段阅读</span>
+              <strong>{{ stint.endStatus ? STATUS_LABELS[stint.endStatus] : '进行中' }}</strong>
+            </div>
+          </div>
+          <p class="muted">{{ formatDateTime(stint.startedAt) }} → {{ stint.endedAt ? formatDateTime(stint.endedAt) : '现在' }}</p>
+          <p v-if="stint.pauseReason" class="preserve-text">暂停原因：{{ stint.pauseReason }}</p>
+          <p v-if="stint.note" class="preserve-text">阶段备注：{{ stint.note }}</p>
+        </article>
+        <p v-if="(bookView.stints ?? []).length === 0" class="empty-inline">还没有开始过一段阅读。</p>
       </div>
 
       <div v-else-if="activeTab === 'TIMELINE'" class="timeline-list">

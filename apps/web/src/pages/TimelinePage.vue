@@ -8,9 +8,11 @@ import {
   ACTION_LABELS,
   ENTITY_LABELS,
   MOOD_LABELS,
+  STATUS_LABELS,
   type ActivityAction,
   type ActivityEntityType,
   type Book,
+  type BookStatus,
   type MoodTag,
   type TimelineEvent
 } from '../types/domain';
@@ -76,7 +78,10 @@ function summary(event: TimelineEvent): string {
     return payload.moodTags.map((tag) => MOOD_LABELS[tag as MoodTag] ?? tag).join('、');
   }
   if (typeof payload.previousStatus === 'string' && typeof payload.nextStatus === 'string') {
-    return `${payload.previousStatus} → ${payload.nextStatus}`;
+    const from = STATUS_LABELS[payload.previousStatus as BookStatus] ?? payload.previousStatus;
+    const to = STATUS_LABELS[payload.nextStatus as BookStatus] ?? payload.nextStatus;
+    const reason = typeof payload.pauseReason === 'string' && payload.pauseReason ? ` · ${payload.pauseReason}` : '';
+    return `${from} → ${to}${reason}`;
   }
   if (typeof payload.summary === 'string') return payload.summary;
   return '';
