@@ -5,7 +5,7 @@ import { BOOK_STATUSES, MOOD_TAGS, type BookStatus, type MoodTag } from '@paper-
 import { prisma } from '../../lib/prisma.js';
 import { AppError, zodFields } from '../../lib/errors.js';
 import { currentUser, requireAuth } from '../../lib/auth.js';
-import { normalizeMoodTags, normalizeText, validateStatusTransition } from '../../lib/domain.js';
+import { deriveReadingRound, normalizeMoodTags, normalizeText, validateStatusTransition } from '../../lib/domain.js';
 import { writeEvent } from '../../lib/events.js';
 import { paginationFromQuery, parseId } from '../../lib/http.js';
 
@@ -76,8 +76,44 @@ const reflectionInputSchema = z.object({
 const statusSchema = z.object({
   status: z.enum(BOOK_STATUSES as [BookStatus, ...BookStatus[]]),
   version: z.number().int().positive().optional(),
-  reflection: reflectionInputSchema.optional()
+  reflection: reflectionInputSchema.optional(),
+  note: z.preprocess(
+    (value) => (value === '' ? null : value),
+    z.string().trim().max(2000).nullable().optional()
+  ),
+  pauseReason: z.preprocess(
+    (value) => (value === '' ? null : value),
+    z.string().trim().max(1000).nullable().optional()
+  )
 });
+
+function serializeStageNote(item: {
+  id: string;
+  bookId: string;
+  version: number;
+  readingRound: number;
+  stage: BookStatus;
+  note: string;
+  pauseReason: string | null;
+  enteredAt: Date;
+  leftAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}) {
+  return {
+    id: item.id,
+    bookId: item.bookId,
+    version: item.version,
+    readingRound: item.readingRound,
+    stage: item.stage,
+    note: item.note,
+    pauseReason: item.pauseReason,
+    enteredAt: item.enteredAt,
+    leftAt: item.leftAt,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt
+  };
+}
 
 function serializeReflection(reflection: {
   id: string;
@@ -115,6 +151,7 @@ function serializeBook(book: {
   pageCount: number | null;
   coverUrl: string | null;
   status: BookStatus;
+  pauseReason: string | null;
   version: number;
   createdAt: Date;
   updatedAt: Date;
@@ -130,6 +167,7 @@ function serializeBook(book: {
     pageCount: book.pageCount,
     coverUrl: book.coverUrl,
     status: book.status,
+    pauseReason: book.pauseReason,
     version: book.version,
     createdAt: book.createdAt,
     updatedAt: book.updatedAt
@@ -278,6 +316,10 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
         reflections: {
           where: { deletedAt: null },
           orderBy: [{ completedAt: 'desc' }, { createdAt: 'desc' }]
+        },
+        stageNotes: {
+          where: { deletedAt: null },
+          orderBy: [{ enteredAt: 'desc' }, { readingRound: 'desc' }]
         }
       }
     });
@@ -291,7 +333,8 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
           annotations: book._count.annotations,
           rereadMarks: book._count.rereadMarks
         },
-        reflections: book.reflections.map(serializeReflection)
+        reflections: book.reflections.map(serializeReflection),
+        stageNotes: book.stageNotes.map(serializeStageNote)
       }
     };
   });
@@ -366,10 +409,48 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
       }
       validateStatusTransition(book.status, parsed.data.status);
       if (book.status === parsed.data.status) {
-        return { book, reflection: null };
+        return { book, reflection: null, stageNote: null };
+      }
+      const nextStatus = parsed.data.status;
+      const noteText = parsed.data.note ? normalizeText(parsed.data.note) : null;
+      const pauseReasonText = parsed.data.pauseReason ? normalizeText(parsed.data.pauseReason) : null;
+      if (noteText && nextStatus === 'READ') {
+        throw new AppError(422, 'NOTE_USE_REFLECTION', '读完时的话请记录在完成感受中', {
+          note: '读完时的话请记录在完成感受中'
+        });
+      }
+      if (pauseReasonText && nextStatus !== 'PAUSED') {
+        throw new AppError(422, 'PAUSE_REASON_NOT_ALLOWED', '只有暂时搁置阶段可以记录暂停原因', {
+          pauseReason: '只有暂时搁置阶段可以记录暂停原因'
+        });
       }
 
-      if (parsed.data.status === 'READ') {
+      const now = new Date();
+      const roundAggregate = await tx.stageNote.aggregate({ where: { bookId }, _max: { readingRound: true } });
+      const readingRound = deriveReadingRound(book.status, nextStatus, roundAggregate._max.readingRound ?? 0);
+
+      // Every prior stage ends here: open notes are closed, never rewritten.
+      await tx.stageNote.updateMany({
+        where: { bookId, userId, deletedAt: null, leftAt: null },
+        data: { leftAt: now }
+      });
+
+      const createStageNote = async () => {
+        if (!noteText && !(nextStatus === 'PAUSED' && pauseReasonText)) return null;
+        return tx.stageNote.create({
+          data: {
+            userId,
+            bookId,
+            readingRound,
+            stage: nextStatus,
+            note: noteText ?? '',
+            pauseReason: nextStatus === 'PAUSED' ? pauseReasonText : null,
+            enteredAt: now
+          }
+        });
+      };
+
+      if (nextStatus === 'READ') {
         if (!parsed.data.reflection) {
           throw new AppError(422, 'COMPLETION_REQUIRED', '标记读完时必须记录完成感受', {
             reflection: '请选择情绪标签'
@@ -392,7 +473,6 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
           _max: { completionRound: true }
         });
         const completionRound = (latest._max.completionRound ?? 0) + 1;
-        const now = new Date();
         const reflection = await tx.completionReflection.create({
           data: {
             userId,
@@ -405,9 +485,10 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
             createdAt: now
           }
         });
+        const stageNote = await createStageNote();
         const updated = await tx.book.update({
           where: { id: bookId },
-          data: { status: 'READ', version: { increment: 1 } }
+          data: { status: 'READ', pauseReason: null, version: { increment: 1 } }
         });
         await writeEvent(tx, {
           userId,
@@ -415,7 +496,7 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
           entityType: 'BOOK',
           entityId: bookId,
           action: 'STATUS_CHANGED',
-          payload: { previousStatus: book.status, nextStatus: 'READ', completionRound }
+          payload: { previousStatus: book.status, nextStatus: 'READ', readingRound, completionRound }
         });
         await writeEvent(tx, {
           userId,
@@ -425,12 +506,27 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
           action: 'COMPLETED',
           payload: { moodTags, completionRound }
         });
-        return { book: updated, reflection: serializeReflection(reflection) };
+        if (stageNote) {
+          await writeEvent(tx, {
+            userId,
+            bookId,
+            entityType: 'STAGE_NOTE',
+            entityId: stageNote.id,
+            action: 'CREATED',
+            payload: { readingRound, stage: 'READ', summary: stageNote.note.slice(0, 120) }
+          });
+        }
+        return { book: updated, reflection: serializeReflection(reflection), stageNote: null };
       }
 
+      const stageNote = await createStageNote();
       const updated = await tx.book.update({
         where: { id: bookId },
-        data: { status: parsed.data.status, version: { increment: 1 } }
+        data: {
+          status: nextStatus,
+          pauseReason: nextStatus === 'PAUSED' ? pauseReasonText : null,
+          version: { increment: 1 }
+        }
       });
       await writeEvent(tx, {
         userId,
@@ -438,13 +534,34 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
         entityType: 'BOOK',
         entityId: bookId,
         action: 'STATUS_CHANGED',
-        payload: { previousStatus: book.status, nextStatus: parsed.data.status }
+        payload: {
+          previousStatus: book.status,
+          nextStatus,
+          readingRound,
+          pauseReason: pauseReasonText ? pauseReasonText.slice(0, 120) : ''
+        }
       });
-      return { book: updated, reflection: null };
+      if (stageNote) {
+        await writeEvent(tx, {
+          userId,
+          bookId,
+          entityType: 'STAGE_NOTE',
+          entityId: stageNote.id,
+          action: 'CREATED',
+          payload: {
+            readingRound,
+            stage: nextStatus,
+            pauseReason: pauseReasonText ? pauseReasonText.slice(0, 120) : '',
+            summary: stageNote.note.slice(0, 120)
+          }
+        });
+      }
+      return { book: updated, reflection: null, stageNote: stageNote ? serializeStageNote(stageNote) : null };
     });
     return {
       book: serializeBook(result.book),
-      ...(result.reflection ? { reflection: result.reflection } : {})
+      ...(result.reflection ? { reflection: result.reflection } : {}),
+      ...(result.stageNote ? { stageNote: result.stageNote } : {})
     };
   });
 
@@ -459,17 +576,19 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
         throw new AppError(409, 'STALE_WRITE', '书目已在其他位置被修改，请刷新后重试');
       }
       const now = new Date();
-      const [dogEars, annotations, rereadMarks, reflections] = await Promise.all([
+      const [dogEars, annotations, rereadMarks, reflections, stageNotes] = await Promise.all([
         tx.dogEar.findMany({ where: { bookId, deletedAt: null }, select: { id: true } }),
         tx.annotation.findMany({ where: { bookId, deletedAt: null }, select: { id: true } }),
         tx.rereadMark.findMany({ where: { bookId, deletedAt: null }, select: { id: true } }),
-        tx.completionReflection.findMany({ where: { bookId, deletedAt: null }, select: { id: true } })
+        tx.completionReflection.findMany({ where: { bookId, deletedAt: null }, select: { id: true } }),
+        tx.stageNote.findMany({ where: { bookId, deletedAt: null }, select: { id: true } })
       ]);
       await Promise.all([
         tx.dogEar.updateMany({ where: { bookId, deletedAt: null }, data: { deletedAt: now, version: { increment: 1 } } }),
         tx.annotation.updateMany({ where: { bookId, deletedAt: null }, data: { deletedAt: now, version: { increment: 1 } } }),
         tx.rereadMark.updateMany({ where: { bookId, deletedAt: null }, data: { deletedAt: now, version: { increment: 1 } } }),
-        tx.completionReflection.updateMany({ where: { bookId, deletedAt: null }, data: { deletedAt: now, version: { increment: 1 } } })
+        tx.completionReflection.updateMany({ where: { bookId, deletedAt: null }, data: { deletedAt: now, version: { increment: 1 } } }),
+        tx.stageNote.updateMany({ where: { bookId, deletedAt: null }, data: { deletedAt: now, version: { increment: 1 } } })
       ]);
       await tx.book.update({
         where: { id: bookId },
@@ -487,7 +606,8 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
         ...dogEars.map((item) => ({ entityType: 'DOG_EAR' as const, id: item.id })),
         ...annotations.map((item) => ({ entityType: 'ANNOTATION' as const, id: item.id })),
         ...rereadMarks.map((item) => ({ entityType: 'REREAD_MARK' as const, id: item.id })),
-        ...reflections.map((item) => ({ entityType: 'COMPLETION_REFLECTION' as const, id: item.id }))
+        ...reflections.map((item) => ({ entityType: 'COMPLETION_REFLECTION' as const, id: item.id })),
+        ...stageNotes.map((item) => ({ entityType: 'STAGE_NOTE' as const, id: item.id }))
       ];
       for (const child of childEvents) {
         await writeEvent(tx, {

@@ -620,6 +620,12 @@ small,
   font-weight: 700;
 }
 
+.book-pause-reason {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin: 0.25rem 0 0;
+}
+
 .pagination {
   display: flex;
   align-items: center;

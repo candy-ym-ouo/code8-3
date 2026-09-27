@@ -38,6 +38,7 @@ enum ActivityEntityType {
   ANNOTATION
   REREAD_MARK
   COMPLETION_REFLECTION
+  STAGE_NOTE
 }
 
 enum ActivityAction {
@@ -64,6 +65,7 @@ model User {
   annotations       Annotation[]
   rereadMarks       RereadMark[]
   reflections       CompletionReflection[]
+  stageNotes        StageNote[]
   activityEvents    ActivityEvent[]
 
   @@map("users")
@@ -94,15 +96,17 @@ model Book {
   pageCount       Int?       @map("page_count")
   coverUrl        String?    @map("cover_url")
   status          BookStatus @default(TO_READ)
+  pauseReason     String?    @map("pause_reason") @db.VarChar(1000)
   createdAt       DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt       DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
   deletedAt       DateTime?  @map("deleted_at") @db.Timestamptz(3)
 
-  user          User                   @relation(fields: [userId], references: [id], onDelete: Restrict)
-  dogEars       DogEar[]
-  annotations   Annotation[]
-  rereadMarks   RereadMark[]
-  reflections   CompletionReflection[]
+  user           User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+  dogEars        DogEar[]
+  annotations    Annotation[]
+  rereadMarks    RereadMark[]
+  reflections    CompletionReflection[]
+  stageNotes     StageNote[]
   activityEvents ActivityEvent[]
 
   @@index([userId, deletedAt, updatedAt])
@@ -200,12 +204,37 @@ model ActivityEvent {
   action      ActivityAction
   payloadJson Json               @default("{}") @map("payload_json")
   occurredAt  DateTime           @default(now()) @map("occurred_at") @db.Timestamptz(3)
+  seq         BigInt             @unique @default(autoincrement()) @map("seq")
 
   user User  @relation(fields: [userId], references: [id], onDelete: Restrict)
   book Book? @relation(fields: [bookId], references: [id], onDelete: Restrict)
 
-  @@index([userId, occurredAt])
-  @@index([userId, bookId, occurredAt])
-  @@index([userId, entityType, occurredAt])
+  @@index([userId, occurredAt, seq])
+  @@index([userId, bookId, occurredAt, seq])
+  @@index([userId, entityType, occurredAt, seq])
   @@map("activity_events")
+}
+
+model StageNote {
+  id           String      @id @default(uuid()) @db.Uuid
+  userId       String      @map("user_id") @db.Uuid
+  bookId       String      @map("book_id") @db.Uuid
+  version      Int         @default(1)
+  readingRound Int         @map("reading_round")
+  stage        BookStatus
+  note         String      @db.VarChar(2000)
+  pauseReason  String?     @map("pause_reason") @db.VarChar(1000)
+  enteredAt    DateTime    @map("entered_at") @db.Timestamptz(3)
+  leftAt       DateTime?   @map("left_at") @db.Timestamptz(3)
+  createdAt    DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt    DateTime?   @map("deleted_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  book Book @relation(fields: [bookId], references: [id], onDelete: Restrict)
+
+  @@index([userId, deletedAt, enteredAt])
+  @@index([bookId, readingRound, enteredAt])
+  @@index([bookId, stage, deletedAt])
+  @@map("stage_notes")
 }

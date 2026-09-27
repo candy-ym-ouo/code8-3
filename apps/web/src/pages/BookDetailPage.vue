@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ApiError } from '../api/client';
-import { booksApi, reflectionApi, traceApi } from '../api';
+import { booksApi, reflectionApi, stageApi, traceApi } from '../api';
 import { formatDate, formatDateTime } from '../api/format';
 import ErrorNotice from '../components/ErrorNotice.vue';
 import MoodPicker from '../components/MoodPicker.vue';
@@ -16,13 +16,20 @@ import {
   type BookStatus,
   type MoodTag,
   type Reflection,
+  type StageNote,
   type Trace,
   type TraceType
 } from '../types/domain';
 import { timelineApi } from '../api';
 
-type DeletedItem = { kind: 'DOG_EAR' | 'ANNOTATION' | 'REREAD_MARK' | 'REFLECTION'; id: string; label: string };
+type DeletedItem = {
+  kind: 'DOG_EAR' | 'ANNOTATION' | 'REREAD_MARK' | 'REFLECTION' | 'STAGE_NOTE';
+  id: string;
+  label: string;
+};
 type ReflectionEdit = { id: string; version: number; moodTags: MoodTag[]; text: string };
+type StageEdit = { id: string; version: number; stage: BookStatus; note: string; pauseReason: string };
+type StatusForm = { status: BookStatus; pauseReason: string; note: string };
 
 const route = useRoute();
 const router = useRouter();
@@ -31,16 +38,19 @@ const book = ref<Book | null>(null);
 const bookView = computed(() => book.value as Book);
 const traces = ref<Trace[]>([]);
 const reflections = ref<Reflection[]>([]);
+const stageNotes = ref<StageNote[]>([]);
 const activities = ref<Array<{ id: string; action: keyof typeof ACTION_LABELS; entityType: keyof typeof ENTITY_LABELS; payload: Record<string, unknown>; occurredAt: string }>>([]);
 const loading = ref(true);
 const saving = ref(false);
 const error = ref('');
 const success = ref('');
-const activeTab = ref<'PAGES' | TraceType | 'REFLECTIONS' | 'TIMELINE'>('PAGES');
+const activeTab = ref<'PAGES' | TraceType | 'REFLECTIONS' | 'STAGES' | 'TIMELINE'>('PAGES');
 const createType = ref<TraceType | null>(null);
 const editing = ref<Trace | null>(null);
 const showCompleteForm = ref(false);
 const reflectionEdit = ref<ReflectionEdit | null>(null);
+const stageEdit = ref<StageEdit | null>(null);
+const statusForm = ref<StatusForm | null>(null);
 const lastDeleted = ref<DeletedItem | null>(null);
 const traceForm = reactive({
   pageNumber: '',
@@ -60,6 +70,7 @@ const tabs = computed(() => [
   { value: 'ANNOTATION' as const, label: `批注 ${book.value?.traceSummary.annotations ?? 0}` },
   { value: 'REREAD_MARK' as const, label: `重读 ${book.value?.traceSummary.rereadMarks ?? 0}` },
   { value: 'REFLECTIONS' as const, label: `读完感受 ${reflections.value.length}` },
+  { value: 'STAGES' as const, label: `阶段经历 ${stageNotes.value.length}` },
   { value: 'TIMELINE' as const, label: '本书时间线' }
 ]);
 
@@ -120,15 +131,17 @@ async function load(): Promise<void> {
   loading.value = true;
   error.value = '';
   try {
-    const [bookResult, loadedTraces, reflectionResult, timelineResult] = await Promise.all([
+    const [bookResult, loadedTraces, reflectionResult, stageResult, timelineResult] = await Promise.all([
       booksApi.get(bookId.value),
       loadAllTraces(bookId.value),
       booksApi.reflections(bookId.value),
+      stageApi.list(bookId.value),
       timelineApi.list(new URLSearchParams({ bookId: bookId.value, pageSize: '100' }))
     ]);
     book.value = bookResult.book;
     traces.value = loadedTraces;
     reflections.value = reflectionResult.items;
+    stageNotes.value = stageResult.items;
     activities.value = timelineResult.items;
   } catch (caught) {
     error.value = caught instanceof ApiError ? caught.message : '书目加载失败';
@@ -244,6 +257,7 @@ async function restoreLastDeleted(): Promise<void> {
     if (item.kind === 'ANNOTATION') await traceApi.restoreAnnotation(item.id);
     if (item.kind === 'REREAD_MARK') await traceApi.restoreReread(item.id);
     if (item.kind === 'REFLECTION') await reflectionApi.restore(item.id);
+    if (item.kind === 'STAGE_NOTE') await stageApi.restore(item.id);
     lastDeleted.value = null;
     success.value = '删除已撤销';
     await load();
@@ -260,18 +274,59 @@ async function changeStatus(status: BookStatus): Promise<void> {
     showCompleteForm.value = true;
     return;
   }
-  if (!window.confirm(`将「${book.value.title}」的状态改为“${STATUS_LABELS[status]}”？`)) return;
+  if (status === 'PAUSED') {
+    statusForm.value = { status, pauseReason: book.value.pauseReason ?? '', note: '' };
+    return;
+  }
+  if (status === 'READING') {
+    // 读完后重新阅读会开启新一轮，允许顺手写一句阶段备注；首次开始与暂停后继续则直接切换。
+    if (book.value.status === 'READ') {
+      statusForm.value = { status, pauseReason: '', note: '' };
+      return;
+    }
+    await submitStatusChange(status, undefined, undefined);
+    return;
+  }
+  if (status === 'ABANDONED' && !window.confirm(`确定将「${book.value.title}」标记为停止阅读吗？`)) {
+    return;
+  }
+  await submitStatusChange(status, undefined, undefined);
+}
+
+async function submitStatusChange(
+  status: BookStatus,
+  pauseReason: string | undefined,
+  note: string | undefined
+): Promise<void> {
+  if (!book.value) return;
   saving.value = true;
   error.value = '';
+  statusForm.value = null;
   try {
-    const result = await booksApi.updateStatus(book.value.id, { status, version: book.value.version });
+    const result = await booksApi.updateStatus(book.value.id, {
+      status,
+      version: book.value.version,
+      ...(pauseReason !== undefined ? { pauseReason: pauseReason.trim() || null } : {}),
+      ...(note !== undefined ? { note: note.trim() || null } : {})
+    });
     book.value = { ...book.value, ...result.book, traceSummary: book.value.traceSummary };
-    success.value = '书目状态已更新';
+    success.value = '书目状态已更新，这段经历已留档';
+    await load();
   } catch (caught) {
     error.value = caught instanceof ApiError ? caught.message : '状态更新失败';
   } finally {
     saving.value = false;
   }
+}
+
+async function submitStatusForm(): Promise<void> {
+  if (!statusForm.value) return;
+  const form = statusForm.value;
+  await submitStatusChange(
+    form.status,
+    form.status === 'PAUSED' ? form.pauseReason : undefined,
+    form.note.trim() ? form.note : undefined
+  );
 }
 
 async function completeBook(): Promise<void> {
@@ -343,6 +398,60 @@ async function deleteReflection(reflection: Reflection): Promise<void> {
   }
 }
 
+function openStageEdit(stage: StageNote): void {
+  stageEdit.value = {
+    id: stage.id,
+    version: stage.version,
+    stage: stage.stage,
+    note: stage.note,
+    pauseReason: stage.pauseReason ?? ''
+  };
+}
+
+async function saveStage(): Promise<void> {
+  if (!stageEdit.value) return;
+  saving.value = true;
+  error.value = '';
+  try {
+    await stageApi.update(stageEdit.value.id, {
+      note: stageEdit.value.note,
+      ...(stageEdit.value.stage === 'PAUSED'
+        ? { pauseReason: stageEdit.value.pauseReason.trim() || null }
+        : {}),
+      version: stageEdit.value.version
+    });
+    stageEdit.value = null;
+    success.value = '阶段备注已修订，旧版本仍保留在时间线中';
+    await load();
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : '修订失败';
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function deleteStage(stage: StageNote): Promise<void> {
+  if (!window.confirm('删除这条阶段备注吗？24 小时内可以撤销。')) return;
+  try {
+    await stageApi.delete(stage.id, stage.version);
+    lastDeleted.value = {
+      kind: 'STAGE_NOTE',
+      id: stage.id,
+      label: `第 ${stage.readingRound} 轮 · ${STATUS_LABELS[stage.stage]}`
+    };
+    success.value = '阶段备注已删除，可在 24 小时内撤销';
+    await load();
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : '删除失败';
+  }
+}
+
+function stageTimeRange(stage: StageNote): string {
+  const start = formatDateTime(stage.enteredAt);
+  if (!stage.leftAt) return `${start} 起`;
+  return `${start} – ${formatDateTime(stage.leftAt)}`;
+}
+
 async function deleteBook(): Promise<void> {
   if (!book.value) return;
   if (!window.confirm(`确定删除《${book.value.title}》及其全部阅读痕迹吗？此操作不可从界面撤销。`)) return;
@@ -354,14 +463,30 @@ async function deleteBook(): Promise<void> {
   }
 }
 
+function statusLabel(value: unknown): string {
+  return typeof value === 'string' && value in STATUS_LABELS ? STATUS_LABELS[value as BookStatus] : String(value ?? '');
+}
+
 function eventSummary(payload: Record<string, unknown>): string {
+  if (payload.cascade) return '随书目删除';
+  if (typeof payload.stage === 'string') {
+    const parts = [`第 ${payload.readingRound ?? '?'} 轮`, statusLabel(payload.stage)];
+    if (typeof payload.pauseReason === 'string' && payload.pauseReason) parts.push(`暂停：${payload.pauseReason}`);
+    if (typeof payload.summary === 'string' && payload.summary) parts.push(payload.summary);
+    return parts.join(' · ');
+  }
   if (typeof payload.pageNumber === 'number') return `第 ${payload.pageNumber} 页`;
   if (typeof payload.startPage === 'number') {
     const end = typeof payload.endPage === 'number' ? payload.endPage : payload.startPage;
     return `第 ${payload.startPage}–${end} 页`;
   }
   if (Array.isArray(payload.moodTags)) return payload.moodTags.map((tag) => MOOD_LABELS[tag as MoodTag] ?? tag).join('、');
-  if (payload.cascade) return '随书目删除';
+  if (typeof payload.previousStatus === 'string' && typeof payload.nextStatus === 'string') {
+    const parts = [`${statusLabel(payload.previousStatus)} → ${statusLabel(payload.nextStatus)}`];
+    if (typeof payload.readingRound === 'number') parts.push(`第 ${payload.readingRound} 轮`);
+    if (typeof payload.pauseReason === 'string' && payload.pauseReason) parts.push(`暂停：${payload.pauseReason}`);
+    return parts.join(' · ');
+  }
   return '';
 }
 
@@ -402,6 +527,7 @@ onMounted(load);
       <div>
         <h2>阅读状态</h2>
         <p class="muted">状态只表示书与你的关系，不计算阅读进度或速度。</p>
+        <p v-if="bookView.pauseReason" class="preserve-text">暂停原因：{{ bookView.pauseReason }}</p>
       </div>
       <div class="button-row">
         <button
@@ -417,6 +543,35 @@ onMounted(load);
         </button>
         <span v-if="statusActions.length === 0" class="muted">当前状态没有可执行的后续操作</span>
       </div>
+      <form v-if="statusForm" class="inline-editor" @submit.prevent="submitStatusForm">
+        <h3>
+          {{ statusForm.status === 'PAUSED' ? '为什么暂时放下' : '开始新一轮阅读' }}
+        </h3>
+        <label v-if="statusForm.status === 'PAUSED'">
+          暂停原因（可选）
+          <textarea
+            v-model="statusForm.pauseReason"
+            rows="3"
+            maxlength="1000"
+            placeholder="比如：被别的事打断、暂时读不动、想等心情合适时再继续。"
+          />
+        </label>
+        <label>
+          阶段备注（可选）
+          <textarea
+            v-model="statusForm.note"
+            rows="3"
+            maxlength="2000"
+            :placeholder="statusForm.status === 'PAUSED' ? '记下此刻读到哪里、为什么停下，方便以后接上。' : '重新开始这一轮时，想留给以后的自己的一句话。'"
+          />
+        </label>
+        <div class="form-actions">
+          <button class="button button-quiet" type="button" @click="statusForm = null">取消</button>
+          <button class="button button-primary" type="submit" :disabled="saving">
+            改为“{{ STATUS_LABELS[statusForm.status] }}”
+          </button>
+        </div>
+      </form>
     </section>
 
     <form v-if="showCompleteForm" class="card completion-form" @submit.prevent="completeBook">
@@ -518,6 +673,39 @@ onMounted(load);
           </form>
         </article>
         <p v-if="reflections.length === 0" class="empty-inline">还没有读完后留下的感受。</p>
+      </div>
+
+      <div v-else-if="activeTab === 'STAGES'" class="trace-list">
+        <p class="muted">每一段搁置、重读和读完都按轮次保留；重新阅读不会覆盖以前的经历。</p>
+        <article v-for="stage in stageNotes" :key="stage.id" class="trace-card">
+          <div class="trace-card-heading">
+            <div>
+              <span class="trace-type">第 {{ stage.readingRound }} 轮 · {{ STATUS_LABELS[stage.stage] }}</span>
+              <strong>{{ stageTimeRange(stage) }}</strong>
+            </div>
+            <div class="button-row">
+              <button class="text-button" type="button" @click="openStageEdit(stage)">修订</button>
+              <button class="text-button danger-text" type="button" @click="deleteStage(stage)">删除</button>
+            </div>
+          </div>
+          <p v-if="stage.pauseReason" class="preserve-text">暂停原因：{{ stage.pauseReason }}</p>
+          <p class="preserve-text">{{ stage.note || '这一段没有写下更多备注。' }}</p>
+          <p class="muted">{{ stage.leftAt ? '这一阶段已结束' : '正在这一阶段' }}</p>
+          <form v-if="stageEdit?.id === stage.id" class="inline-editor" @submit.prevent="saveStage">
+            <label v-if="stage.stage === 'PAUSED'">
+              暂停原因
+              <textarea v-model="stageEdit.pauseReason" rows="3" maxlength="1000" />
+            </label>
+            <label>阶段备注<textarea v-model="stageEdit.note" rows="4" maxlength="2000" /></label>
+            <div class="form-actions">
+              <button class="button button-quiet" type="button" @click="stageEdit = null">取消</button>
+              <button class="button button-primary" type="submit" :disabled="saving">保存修订</button>
+            </div>
+          </form>
+        </article>
+        <p v-if="stageNotes.length === 0" class="empty-inline">
+          还没有阶段备注。切换到“暂时搁置”或“重新阅读”时可以顺手记下暂停原因与阶段备注。
+        </p>
       </div>
 
       <div v-else-if="activeTab === 'TIMELINE'" class="timeline-list">

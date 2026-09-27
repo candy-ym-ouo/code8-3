@@ -24,6 +24,7 @@ export interface Book {
   pageCount: number | null;
   coverUrl: string | null;
   status: BookStatus;
+  pauseReason: string | null;
   version: number;
   createdAt: string;
   updatedAt: string;
@@ -31,6 +32,7 @@ export interface Book {
   hasCompletionReflection?: boolean;
   lastTraceAt?: string | null;
   reflections?: Reflection[];
+  stageNotes?: StageNote[];
 }
 
 export interface DogEar {
@@ -78,6 +80,20 @@ export interface Reflection {
   completedAt: string;
   editableUntil: string;
   version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StageNote {
+  id: string;
+  bookId: string;
+  version: number;
+  readingRound: number;
+  stage: BookStatus;
+  note: string;
+  pauseReason: string | null;
+  enteredAt: string;
+  leftAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -139,5 +155,6 @@ export const ENTITY_LABELS: Record<ActivityEntityType, string> = {
   DOG_EAR: '折角',
   ANNOTATION: '批注',
   REREAD_MARK: '重读页',
-  COMPLETION_REFLECTION: '完成感受'
+  COMPLETION_REFLECTION: '完成感受',
+  STAGE_NOTE: '阶段备注'
 };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isRestoreWindowOpen, isStrictlyEditable, normalizeMoodTags, validatePageRange, validateStatusTransition } from './domain.js';
+import { deriveReadingRound, isRestoreWindowOpen, isStrictlyEditable, normalizeMoodTags, validatePageRange, validateStatusTransition } from './domain.js';
 import { AppError } from './errors.js';
 
 describe('domain rules', () => {
@@ -11,6 +11,15 @@ describe('domain rules', () => {
   it('rejects illegal status transitions', () => {
     expect(() => validateStatusTransition('TO_READ', 'READ')).toThrow(AppError);
     expect(() => validateStatusTransition('ABANDONED', 'READING')).toThrow(AppError);
+  });
+
+  it('keeps one round across pause/resume and opens a new round only after finishing', () => {
+    expect(deriveReadingRound('TO_READ', 'READING', 0)).toBe(1);
+    expect(deriveReadingRound('READING', 'PAUSED', 1)).toBe(1);
+    expect(deriveReadingRound('PAUSED', 'READING', 1)).toBe(1);
+    expect(deriveReadingRound('READING', 'READ', 1)).toBe(1);
+    expect(deriveReadingRound('READ', 'READING', 1)).toBe(2);
+    expect(deriveReadingRound('PAUSED', 'READ', 2)).toBe(2);
   });
 
   it('validates page ranges and page count', () => {

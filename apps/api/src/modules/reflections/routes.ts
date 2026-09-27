@@ -198,9 +198,13 @@ export const reflectionRoutes: FastifyPluginAsync = async (app) => {
         where: { id },
         data: { deletedAt: null, version: { increment: 1 } }
       });
+      await tx.stageNote.updateMany({
+        where: { bookId: existing.bookId, userId, deletedAt: null, leftAt: null },
+        data: { leftAt: new Date() }
+      });
       await tx.book.update({
         where: { id: existing.bookId },
-        data: { status: 'READ', version: { increment: 1 } }
+        data: { status: 'READ', pauseReason: null, version: { increment: 1 } }
       });
       await writeEvent(tx, {
         userId,

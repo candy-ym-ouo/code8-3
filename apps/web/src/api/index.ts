@@ -8,6 +8,7 @@ import type {
   Pagination,
   Reflection,
   RereadMark,
+  StageNote,
   TimelineEvent,
   Trace,
   User
@@ -42,8 +43,18 @@ export const booksApi = {
     api.patch<{ book: Book }>(`/books/${id}`, body),
   updateStatus: (
     id: string,
-    body: { status: BookStatus; version: number; reflection?: { moodTags: MoodTag[]; text: string } }
-  ) => api.patch<{ book: Book; reflection?: Reflection }>(`/books/${id}/status`, body),
+    body: {
+      status: BookStatus;
+      version: number;
+      reflection?: { moodTags: MoodTag[]; text: string };
+      note?: string | null;
+      pauseReason?: string | null;
+    }
+  ) =>
+    api.patch<{ book: Book; reflection?: Reflection; stageNote?: StageNote }>(
+      `/books/${id}/status`,
+      body
+    ),
   delete: (id: string, version: number) => api.delete<void>(`/books/${id}`, { version }),
   traces: (id: string, params: URLSearchParams) =>
     api.get<{ items: Trace[]; pagination: Pagination }>(`/books/${id}/traces?${params}`),
@@ -78,6 +89,16 @@ export const reflectionApi = {
     api.patch<{ reflection: Reflection }>(`/reflections/${id}`, body),
   delete: (id: string, version: number) => api.delete<void>(`/reflections/${id}`, { version }),
   restore: (id: string) => api.post<{ reflection: Reflection }>(`/reflections/${id}/restore`)
+};
+
+export const stageApi = {
+  list: (bookId: string) => api.get<{ items: StageNote[] }>(`/books/${bookId}/stages`),
+  update: (
+    id: string,
+    body: { note?: string; pauseReason?: string | null; version: number }
+  ) => api.patch<{ stageNote: StageNote }>(`/stage-notes/${id}`, body),
+  delete: (id: string, version: number) => api.delete<void>(`/stage-notes/${id}`, { version }),
+  restore: (id: string) => api.post<{ stageNote: StageNote }>(`/stage-notes/${id}/restore`)
 };
 
 export const timelineApi = {

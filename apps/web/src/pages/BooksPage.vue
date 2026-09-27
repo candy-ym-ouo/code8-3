@@ -101,6 +101,9 @@ onMounted(load);
             <span class="status-badge" :data-status="book.status">{{ STATUS_LABELS[book.status] }}</span>
             <h2><RouterLink :to="`/books/${book.id}`">{{ book.title }}</RouterLink></h2>
             <p class="muted">{{ book.author || '作者未填写' }}</p>
+            <p v-if="book.status === 'PAUSED' && book.pauseReason" class="preserve-text book-pause-reason">
+              暂停原因：{{ book.pauseReason }}
+            </p>
           </div>
         </div>
         <p v-if="book.lastTraceAt" class="book-last-trace">

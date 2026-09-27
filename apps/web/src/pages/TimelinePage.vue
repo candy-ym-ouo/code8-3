@@ -8,9 +8,11 @@ import {
   ACTION_LABELS,
   ENTITY_LABELS,
   MOOD_LABELS,
+  STATUS_LABELS,
   type ActivityAction,
   type ActivityEntityType,
   type Book,
+  type BookStatus,
   type MoodTag,
   type TimelineEvent
 } from '../types/domain';
@@ -66,8 +68,19 @@ function filter(): void {
   void load();
 }
 
+function statusLabel(value: unknown): string {
+  return typeof value === 'string' && value in STATUS_LABELS ? STATUS_LABELS[value as BookStatus] : String(value ?? '');
+}
+
 function summary(event: TimelineEvent): string {
   const payload = event.payload;
+  if (payload.cascade) return '随书目删除';
+  if (typeof payload.stage === 'string') {
+    const parts = [`第 ${payload.readingRound ?? '?'} 轮`, statusLabel(payload.stage)];
+    if (typeof payload.pauseReason === 'string' && payload.pauseReason) parts.push(`暂停：${payload.pauseReason}`);
+    if (typeof payload.summary === 'string' && payload.summary) parts.push(payload.summary);
+    return parts.join(' · ');
+  }
   if (typeof payload.pageNumber === 'number') return `第 ${payload.pageNumber} 页`;
   if (typeof payload.startPage === 'number') {
     return `第 ${payload.startPage}–${typeof payload.endPage === 'number' ? payload.endPage : payload.startPage} 页`;
@@ -76,7 +89,10 @@ function summary(event: TimelineEvent): string {
     return payload.moodTags.map((tag) => MOOD_LABELS[tag as MoodTag] ?? tag).join('、');
   }
   if (typeof payload.previousStatus === 'string' && typeof payload.nextStatus === 'string') {
-    return `${payload.previousStatus} → ${payload.nextStatus}`;
+    const parts = [`${statusLabel(payload.previousStatus)} → ${statusLabel(payload.nextStatus)}`];
+    if (typeof payload.readingRound === 'number') parts.push(`第 ${payload.readingRound} 轮`);
+    if (typeof payload.pauseReason === 'string' && payload.pauseReason) parts.push(`暂停：${payload.pauseReason}`);
+    return parts.join(' · ');
   }
   if (typeof payload.summary === 'string') return payload.summary;
   return '';

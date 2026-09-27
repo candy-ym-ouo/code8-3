@@ -46,7 +46,7 @@ export const timelineRoutes: FastifyPluginAsync = async (app) => {
       prisma.activityEvent.count({ where }),
       prisma.activityEvent.findMany({
         where,
-        orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+        orderBy: [{ occurredAt: 'desc' }, { seq: 'desc' }],
         skip,
         take: pageSize,
         include: { book: { select: { title: true } } }

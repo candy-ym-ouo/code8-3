@@ -64,6 +64,17 @@ export function validateStatusTransition(current: BookStatus, next: BookStatus):
   }
 }
 
+/**
+ * 阅读轮次是一段从“阅读中”开始、到“读完/停止”结束的经历。
+ * 暂停后继续读仍属于同一轮；读完后再读则开启新一轮，旧轮次的备注永远保留。
+ */
+export function deriveReadingRound(current: BookStatus, next: BookStatus, maxRound: number): number {
+  if (next === 'READING') {
+    return current === 'PAUSED' ? Math.max(maxRound, 1) : maxRound + 1;
+  }
+  return Math.max(maxRound, 1);
+}
+
 export function normalizeMoodTags(tags: MoodTag[]): MoodTag[] {
   const unique = [...new Set(tags)];
   if (unique.length < 1 || unique.length > 3) {
